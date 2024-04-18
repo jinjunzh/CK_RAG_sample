@@ -10,6 +10,7 @@ from clickhouse_connect import common
 from llama_index.core.settings import Settings
 from llama_index.embeddings.fastembed import FastEmbedEmbedding
 from llama_index.llms.openai import OpenAI
+from llama_index.llms.ollama import Ollama
 
 from llama_index.core import VectorStoreIndex, PromptTemplate
 from llama_index.core.indices.struct_store import NLSQLTableQueryEngine
@@ -20,6 +21,8 @@ from llama_index.core.query_engine import RetrieverQueryEngine, SQLAutoVectorQue
 from llama_index.core.tools import QueryEngineTool
 from llama_index.core.vector_stores.types import VectorStoreInfo, MetadataInfo
 from llama_index.vector_stores.clickhouse import ClickHouseVectorStore
+from llama_index.core.service_context import ServiceContext
+
 import clickhouse_connect
 import openai
 from sqlalchemy import (
@@ -135,15 +138,14 @@ def sql_auto_vector_query_engine():
         vector_index = VectorStoreIndex.from_vector_store(vector_store)
         return sql_database, vector_index
 
-
 def get_engine(min_length, score, min_date):
     sql_database, vector_index = sql_auto_vector_query_engine()
-
+    service_context = ServiceContext.from_defaults(llm=Ollama(model="llama2:13b", request_timeout=300.0), embed_model="local:/mnt/home0/jasper/rag/model/bge-base-en-v1.5")
     nl_sql_engine = NLSQLTableQueryEngine(
         sql_database=sql_database,
         tables=[stackoverflow_table],
         text_to_sql_prompt=CLICKHOUSE_TEXT_TO_SQL_PROMPT,
-        llm=OpenAI(model=open_ai_model)
+        service_context=service_context
     )
     vector_store_info = VectorStoreInfo(
         content_info="Social news posts and comments from users",
@@ -162,11 +164,11 @@ def get_engine(min_length, score, min_date):
 
     vector_auto_retriever = VectorIndexAutoRetriever(
         vector_index, vector_store_info=vector_store_info, similarity_top_k=10,
-        prompt_template_str=CLICKHOUSE_VECTOR_STORE_QUERY_PROMPT_TMPL, llm=OpenAI(model=open_ai_model),
+        prompt_template_str=CLICKHOUSE_VECTOR_STORE_QUERY_PROMPT_TMPL, llm=Ollama(model="llama2:13b", request_timeout=300.0),
         vector_store_kwargs={"where": f"length >= {min_length} AND post_score >= {score} AND time >= '{min_date}'"}
     )
 
-    retriever_query_engine = RetrieverQueryEngine.from_args(vector_auto_retriever, llm=OpenAI(model=open_ai_model))
+    retriever_query_engine = RetrieverQueryEngine.from_args(vector_auto_retriever, llm=Ollama(model="llama2:13b", request_timeout=300.0))
 
     sql_tool = QueryEngineTool.from_defaults(
         query_engine=nl_sql_engine,
@@ -184,19 +186,20 @@ def get_engine(min_length, score, min_date):
     )
 
     return SQLAutoVectorQueryEngine(
-        sql_tool, vector_tool, llm=OpenAI(model=open_ai_model)
+        sql_tool, vector_tool, llm=Ollama(model="llama2:13b", request_timeout=300.0)
     )
 
 
 # identify the value ranges for our score, length and date widgets
 if "max_score" not in st.session_state.keys():
     client = clickhouse()
-    st.session_state.max_score = int(
-        client.query("SELECT max(post_score) FROM default.hackernews_llama").first_row[0])
-    st.session_state.max_length = int(
-        client.query("SELECT max(length) FROM default.hackernews_llama").first_row[0])
-    st.session_state.min_date, st.session_state.max_date = client.query(
-        "SELECT min(toDate(time)), max(toDate(time)) FROM default.hackernews_llama WHERE time != '1970-01-01 00:00:00'").first_row
+    query_max_score = 'SELECT max(post_score) FROM default.{}'.format(hackernews_table)
+    query_max_length = 'SELECT max(length) FROM default.{}'.format(hackernews_table)
+    query_min_max_date = "SELECT min(toDate(time)), max(toDate(time)) FROM default.{} WHERE time != '1970-01-01 00:00:00'".format(hackernews_table)
+    st.session_state.max_score = int(client.query(query_max_score).first_row[0])
+    st.session_state.max_length = int(client.query(query_max_length).first_row[0])
+    st.session_state.min_date, st.session_state.max_date = client.query(query_min_max_date).first_row
+    print(f"max_score: {st.session_state.max_score}, max_length: {st.session_state.max_length}, min_date: {st.session_state.min_date}, max_date:{st.session_state.max_date}\n")
 
 # set the initial message on load. Store in the session.
 if "messages" not in st.session_state:
